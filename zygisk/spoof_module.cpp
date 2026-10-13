@@ -69,6 +69,21 @@ static json readEffectiveDeviceConfig() {
     }
 }
 
+static std::string readGlobalDeviceProperty(const char* propertyName) {
+    if (!propertyName || !*propertyName) return {};
+    std::ifstream file("/data/adb/COPG/global-device.props");
+    if (!file.is_open()) return {};
+    std::string line;
+    while (std::getline(file, line)) {
+        const auto tab = line.find('\t');
+        if (tab == std::string::npos || line.compare(0, tab, propertyName) != 0) continue;
+        if (tab != std::string(propertyName).size()) continue;
+        std::string value = trim(line.substr(tab + 1));
+        if (!value.empty() && value != "Undefined") return value;
+    }
+    return {};
+}
+
 static std::string effectiveDeviceValue(const char* field) {
     json device = readEffectiveDeviceConfig();
     if (!device.is_object()) return {};
@@ -167,8 +182,12 @@ static std::string spoofedSystemPropertyValue(const std::string& key) {
     if (key == "gsm.operator.alpha") return country("OPERATOR_NAME", "OPERATOR_NAME_ENABLED");
     if (key == "gsm.sim.operator.alpha") return country("OPERATOR_NAME", "OPERATOR_NAME_ENABLED");
     if (key == "gsm.version.baseband" || key == "ro.baseband") {
+        // Resolve in the same order as the device editor: selected profile BASEBAND,
+        // its RADIO alias, the exact value published for resetprop, then legacy COPG config.
         std::string value = effectiveDeviceValue("BASEBAND");
-        return value.empty() ? readConfigString("COPG", "BASEBAND") : value;
+        if (value.empty()) value = readGlobalDeviceProperty("ro.baseband");
+        if (value.empty()) value = readConfigString("COPG", "BASEBAND");
+        return value;
     }
     return {};
 }
@@ -1063,17 +1082,14 @@ private:
     // property is available before Android services start.
     static bool readBasebandConfig(std::string& out) {
         out = effectiveDeviceValue("BASEBAND");
-        if (!out.empty()) return true;
-        std::ifstream file(config_file);
-        if (!file.is_open()) return false;
-        try {
-            json config = json::parse(file);
-            if (!config.contains(std::string(LOG_TAG)) || !config[LOG_TAG].is_object()) return false;
-            out = trim(config[LOG_TAG].value("BASEBAND", ""));
-            return !out.empty() && out != "Undefined";
-        } catch (...) {
+        if (out.empty()) out = readGlobalDeviceProperty("ro.baseband");
+        if (out.empty()) out = readConfigString("COPG", "BASEBAND");
+        if (out.empty() || out == "Undefined") {
+            LOGE("No usable BASEBAND/RADIO value found in selected device profile, global-device.props, or legacy COPG config");
             return false;
         }
+        LOGE("Resolved baseband override from active device profile: %s", out.c_str());
+        return true;
     }
 
     static void applyBasebandHook(JNIEnv* env, const std::string& baseband) {
